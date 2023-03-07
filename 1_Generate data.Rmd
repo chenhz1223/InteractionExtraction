@@ -1,0 +1,285 @@
+---
+title: "Generate data"
+author: "Chenhao Zhao"
+date: "1/1/2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Normal: y~N(mu,sigma^2); mu=f(beta_0+beta*x+beta_2*x_i*x_j+theta); theta~N(0,tau^2)
+
+# Scenario 1: Normal
+
+$$
+y\sim N(\mu,\sigma^2)
+$$
+
+$$
+\mu = f(\beta_0+\beta_1 x + \beta_2 x_ix_j+\theta),\theta\sim N(0,\tau^2)
+$$
+
+
+
+```{r}
+set.seed(42)
+n.batches<-15L
+simulate.binary<-T
+simulate.data_4v<-function(n.batches=15L,
+                        sigma.b=15,
+                        seed=42,
+                        sample_size=500,
+                        b=c(5,1,3,-2),
+                        b_int=c(-2,3),
+                        simulate.binary=F,
+                        proportion=0.5)
+{set.seed(seed)
+X<-matrix(rnorm(4*sample_size),4,sample_size)
+e<-rnorm(sample_size)
+batch.val<-rnorm(n.batches,0,sigma.b)
+batch.assignment<-sample(1:n.batches,500,replace=T)
+b_<-batch.val[batch.assignment]
+# b<-c(25,1,3,-2)
+mu<-as.vector(matrix(b,1,4)%*%X)+b_int[1]*X[3,]*X[2,]+b_int[2]*X[3,]*X[4,]+b_
+Y_star<-mu+e
+if (simulate.binary){Y<-Y_star>=quantile(Y_star,1-proportion)}
+else {Y<-Y_star}
+data<-as.data.frame(t(rbind(X,Y,batch.assignment)))
+return(list(data=data,X=X,Y=Y))}
+
+simulate.data_7v<-function(n.batches=15L,
+                        sigma.b=15,
+                        seed=42,
+                        sample_size=500,
+                        b=c(5,1,3,-2,7,3,2),
+                        b_int=c(-2,3),
+                        simulate.binary=F,
+                        proportion=0.5)
+{set.seed(seed)
+X<-matrix(rnorm(7*sample_size),7,sample_size)
+e<-rnorm(sample_size)
+batch.val<-rnorm(n.batches,0,sigma.b)
+batch.assignment<-sample(1:n.batches,500,replace=T)
+b_<-batch.val[batch.assignment]
+# b<-c(25,1,3,-2)
+mu<-as.vector(matrix(b,1,7)%*%X)+b_int[1]*X[3,]*X[2,]+b_int[2]*X[3,]*X[4,]+b_
+Y_star<-mu+e
+if (simulate.binary){Y<-Y_star>=quantile(Y_star,1-proportion)}
+else {Y<-Y_star}
+data<-as.data.frame(t(rbind(X,Y,batch.assignment)))
+return(list(data=data,X=X,Y=Y))}
+data<-simulate.data_4v()$data
+X <- simulate.data_4v()$X
+```
+
+```{r}
+#write.csv(data, "simulation.csv")
+mainDir <- getwd()
+subDir <- " "
+```
+
+
+# Total data sets
+
+- 4 variables(basic case)(Normal/binary)
+```{r normal_basic}
+# simulate.data_4v(simulate.binary=TRUE)
+# simulate.data_4v(simulate.binary=FALSE)
+subDir <- "normalBasic"
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+for (i in 1:100) {
+  data<-simulate.data_4v(simulate.binary=FALSE, seed = i)$data
+  write.csv(data, paste0(i,".csv"))
+}
+
+```
+
+```{r normal_binary}
+# simulate.data_4v(simulate.binary=TRUE)
+# simulate.data_4v(simulate.binary=FALSE)
+subDir <- "normalBinary"
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+for (i in 1:100) {
+  data<-simulate.data_4v(simulate.binary=TRUE, seed = i)$data
+  write.csv(data, paste0(i,".csv"))
+}
+
+```
+- more variables(Normal/binary)
+```{r}
+simulate.data_7v(simulate.binary=TRUE)
+simulate.data_7v(simulate.binary=FALSE)
+```
+
+```{r}
+subDir <- "moreVarBasic"
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+for (i in 1:100) {
+  data<-simulate.data_7v(simulate.binary=FALSE)$data
+  write.csv(data, paste0(i,".csv"))
+}
+
+subDir <- "moreVarBinary"
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+for (i in 1:100) {
+  data<-simulate.data_7v(simulate.binary=TRUE)$data
+  write.csv(data, paste0(i,".csv"))
+}
+```
+
+
+- increase interaction strength(Normal/binary)
+
+```{r}
+simulate.data_4v(simulate.binary=TRUE,b_int=c(-10,15))
+simulate.data_4v(simulate.binary=FALSE,b_int=c(-10,15))
+```
+
+```{r}
+subDir <- "strongerInteraction"
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+for (i in 1:100) {
+  data<-simulate.data_4v(simulate.binary=FALSE,b_int=c(-10,15))$data
+  write.csv(data, paste0(i,".csv"))
+}
+
+subDir <- "strongerInteractionBinary"
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+for (i in 1:100) {
+  data<-simulate.data_4v(simulate.binary=TRUE,b_int=c(-10,15))$data
+  write.csv(data, paste0(i,".csv"))
+}
+
+```
+
+
+- modified batch effect(Normal/binary)
+```{r}
+simulate.data_4v(simulate.binary=TRUE,sigma.b=30)
+simulate.data_4v(simulate.binary=FALSE,sigma.b=30)
+```
+
+```{r}
+subDir <- "diffBatchEffect"
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+for (i in 1:100) {
+  data<-simulate.data_4v(simulate.binary=FALSE,sigma.b=30)$data
+  write.csv(data, paste0(i,".csv"))
+}
+
+subDir <- "diffBatchEffectBinary"
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+for (i in 1:100) {
+  data<-simulate.data_4v(simulate.binary=TRUE,sigma.b=30)$data
+  write.csv(data, paste0(i,".csv"))
+}
+
+```
+
+
+- more sample size(n = 1000)(Normal/binary)
+```{r}
+simulate.data_4v(simulate.binary=TRUE,sample_size=1000)
+simulate.data_4v(simulate.binary=FALSE,sample_size=1000)
+```
+
+```{r}
+subDir <- "moreSampleSize"
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+for (i in 1:100) {
+  data<-simulate.data_4v(simulate.binary=FALSE,sample_size=1000)$data
+  write.csv(data, paste0(i,".csv"))
+}
+
+subDir <- "moreSampleSizeBinary"
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+for (i in 1:100) {
+  data<-simulate.data_4v(simulate.binary=TRUE,sample_size=1000)$data
+  write.csv(data, paste0(i,".csv"))
+}
+```
+
+
+- rare case(binary, 5%)
+
+```{r}
+simulate.data_4v(simulate.binary=TRUE,proportion=0.05)
+```
+
+```{r}
+subDir <- "rareCase"
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+for (i in 1:100) {
+  data<-simulate.data_4v(simulate.binary=TRUE, seed = i, proportion = 0.05)$data
+  write.csv(data, paste0(i,".csv"))
+}
+```
+

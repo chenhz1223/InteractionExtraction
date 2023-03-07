@@ -1,0 +1,372 @@
+---
+title: "BART_simulation"
+author: "Chenhao Zhao"
+date: "1/1/2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(dbarts)
+library(stan4bart)
+library(sys)
+options(reticulate.conda_binary = "/Users/shaunzhao/Library/r-miniconda-arm64/bin/conda")
+Sys.setenv(RETICULATE_PYTHON="/Users/shaunzhao/Library/r-miniconda-arm64/envs/py37/bin/python")
+reticulate::use_python("/Users/shaunzhao/Library/r-miniconda-arm64/envs/py37/bin/python")
+library(reticulate)
+library(bayesplot)
+library(comprehenr)
+library(brms)
+library(bayestestR)
+library(ggridges)
+
+pd<-import("pandas")
+np<-import("numpy")
+
+```
+
+```{python}
+LOAD_PYMC=True
+EPS=1e-3
+import shap
+import pandas as pd
+import numpy as np
+import copy
+import dask
+from dask.diagnostics import ProgressBar
+import numpy as np
+import matplotlib.pyplot as plt
+from numpy.random import RandomState
+from numpy.testing import assert_almost_equal
+import copy
+if LOAD_PYMC:
+  import pymc as pm
+  import pymc_bart as pmb
+  from pymc_bart.tree import SplitNode
+from functools import reduce
+
+def rebuildTree(tree,X):
+    variableNames=list(range(X.shape[1]))#X.columns
+    def rebuild_tree_recurse(tree):
+        node=dict(value=tree["value"].iloc[0],
+                 n = tree['n'].iloc[0])
+        if tree['var'].iloc[0]==-1:
+            node['n_nodes']=1
+            return node
+        node['var']=tree['var'].iloc[0]#variableNames[tree['var'].iloc[0]-1]
+        # print(node['var'])
+        head_of_left_branch = tree.iloc[1:]
+        left = rebuild_tree_recurse(head_of_left_branch)
+        n_nodes_left = left['n_nodes']
+        left['n_nodes'] = None
+        node['left'] = left
+        head_of_right_branch = tree.iloc[2+n_nodes_left-1:]
+        right = rebuild_tree_recurse(head_of_right_branch)
+        n_nodes_right = right['n_nodes']
+        right['n_nodes'] = None
+        node['right'] = right
+        node['n_nodes']= 1 + n_nodes_left + n_nodes_right
+        return node
+    result = rebuild_tree_recurse(tree)
+    result['n_nodes']=None
+    return result
+
+def preorderTraversal(root):
+    answer = []
+    preorderTraversalUtil(root, answer)
+    return root,answer
+
+def preorderTraversalUtil(root, answer):
+    if root is None:
+        return 
+    if not (root.get("left",None) is None and root.get("right",None) is None):
+        root['split_var']=root['var']#int(root['var'].replace("V",""))-1
+    root['index']=answer[-1]['index']+1 if len(answer) else 0#['index']
+    answer.append(root)
+    preorderTraversalUtil(root.get("left",None), answer)
+    preorderTraversalUtil(root.get("right",None), answer)
+    return
+
+def return_mean(x):
+    if isinstance(x,np.ndarray): return x.mean()
+    return x
+    
+def return_items(nodes, keys):
+    return [(k,nodes[k]) for k in range(len(nodes))]
+
+def cvt_tree(nodes):
+    weights={k:nodes[k]['n'] for k in range(len(nodes))}
+    keys=sorted(weights.keys())
+    new_idx={k[1]:k[0] for k in enumerate(keys)}
+    tree_items=return_items(nodes,keys)
+    tree_dict={}
+    tree_dict['children_left']={k:nodes[k].get('left',{}).get("index",-1) if nodes[k].get('split_var',False) else -1 for k in range(len(nodes))}
+    tree_dict['children_right']={k:nodes[k].get('right',{}).get("index",-1) if nodes[k].get('split_var',False) else -1 for k in range(len(nodes))}
+    tree_dict['children_default']=tree_dict['children_right'].copy()
+    tree_dict['node_sample_weight']={k:float(v) for k,v in weights.items()}
+    tree_dict['features']={k:nodes[k].get('split_var',-1)-1 if nodes[k].get('split_var',False) else -2 for k in range(len(nodes))}
+    tree_dict['values']={k:nodes[k].get('value',-1) if not nodes[k].get('split_var',False) else -3 for k in range(len(nodes))}
+    tree_dict['thresholds']={k:nodes[k].get('value',-1) if nodes[k].get('split_var',False) else -3 for k in range(len(nodes))}
+    tree_dict={k:np.array(list(v.values())).reshape(-1,1) if k=='values' else np.array(list(v.values())) for k,v in tree_dict.items()}
+    return tree_dict
+
+def prepare_tree(tree,X):
+    tree=rebuildTree(tree,X)#trees.query("chain==1&sample==1&tree==1")
+    tree_new,nodes=preorderTraversal(copy.deepcopy(tree))
+    tree_dict=cvt_tree(nodes)
+    return tree_dict
+
+def run_shap(tree,X,sample_mean=True):
+    tree_dict=prepare_tree(tree,X)
+    explainer = shap.TreeExplainer(dict(trees=[tree_dict]),feature_perturbation="tree_path_dependent")
+    shap_vals,shap_int=explainer.shap_values(X,check_additivity=False),explainer.shap_interaction_values(X)
+    if sample_mean: shap_vals,shap_int=np.abs(shap_vals).mean(0),np.abs(shap_int).mean(0)
+    return shap_vals,shap_int
+    
+def run_shap_trees(trees,X,n_samples=0,use_abs=False,take_mean=False):
+  shap_ints=[]
+  for sample,trees_ in trees.groupby('sample'):
+    if n_samples and sample==n_samples+1: break
+    shap_ints.append([])
+    for name,trees__ in trees_.groupby('chain'):
+        shap_ints[-1].append([])
+        for name,tree in trees__.groupby('tree'):
+            shap_ints[-1][-1].append(dask.delayed(lambda x,y: run_shap(x,y)[1])(tree,X))
+  with ProgressBar():
+      shap_ints=dask.compute(*shap_ints,num_workers=8,scheduler='threading')
+  shap_ints=np.stack(shap_ints)
+  if use_abs: shap_ints=np.abs(shap_ints)
+  if take_mean: shap_ints=shap_ints.mean(1)
+  return shap_ints
+
+def run_pymc(Y,X,batch_assignment,b_):
+  # Y = mu+e
+  batch_assignment=np.array(batch_assignment)
+  b_=np.array(b_)
+  Y=np.array(Y)
+  coords = {
+    "batch": b_,
+    "obs_id": np.arange(len(batch_assignment)),
+  }
+  with pm.Model(coords=coords) as model:
+      batch_assign = pm.Data("batch_assign", batch_assignment, dims="obs_id")
+      b = pm.Normal("b", 0, sigma=3, dims="batch")
+      mu_bart = pmb.BART("mu_bart", X, Y, m=30, alpha=0.3)#, response="mix"
+      sigma = pm.HalfNormal("sigma", 1)
+      mu_ = mu_bart+b[batch_assign]
+      y = pm.Normal("y", mu_, sigma, observed=Y)
+      idata = pm.sample(random_seed=12345)
+  return idata
+
+def return_items_pymc(tree, keys):
+    return [(k,tree.get_node(k)) for k in sorted(keys)]
+
+def cvt_tree_pymc(tree,X):
+    X_add=[]
+    weights={k:0. for k in sorted(tree.tree_structure.keys())}
+    for i in range(len(X)):
+        x=X[i]
+        current_node = tree.get_node(0)
+        while isinstance(current_node, SplitNode):
+            split_variable = current_node.idx_split_variable
+            if x[split_variable] <= current_node.split_value:
+                left_child = current_node.get_idx_left_child()
+                current_node, split_variable = tree._traverse_tree(x, left_child, split_variable)
+            else:
+                right_child = current_node.get_idx_right_child()
+                current_node, split_variable = tree._traverse_tree(x, right_child, split_variable)
+        k=current_node.index
+        while k!=-1:
+            current_node=tree.get_node(k)
+            weights[k]+=1
+            k=current_node.get_idx_parent_node()
+
+    for k in list(weights.keys()): 
+        if weights[k]==0: 
+            current_node=tree.get_node(k)
+            if not isinstance(current_node, SplitNode):
+                rules=[]
+                while k!=-1:
+                    weights[k]+=1
+                    prev_k=k
+                    k=current_node.get_idx_parent_node()
+                    if k!=-1: current_node=tree.get_node(k)
+                    rules.append((current_node.idx_split_variable,current_node.split_value,np.argmax([current_node.get_idx_left_child()==prev_k,current_node.get_idx_right_child()==prev_k])))
+                x_new=np.zeros_like(x)
+                for ft,v,is_right in rules:
+                    x_new[ft]=v+EPS if is_right else v-EPS
+                X_add.append(x_new)
+
+    keys=sorted(weights.keys())
+    
+    new_idx={k[1]:k[0] for k in enumerate(keys)}
+    tree_items=return_items_pymc(tree,keys)
+    tree_dict={}
+    tree_dict['children_left']={k:new_idx.get(v.get_idx_left_child(),-1) if isinstance(v, SplitNode) else -1 for k,v in tree_items}
+    tree_dict['children_right']={k:new_idx.get(v.get_idx_right_child(),-1) if isinstance(v, SplitNode) else -1 for k,v in tree_items}
+    tree_dict['children_default']=tree_dict['children_right'].copy()
+    tree_dict['node_sample_weight']={k:float(v) for k,v in weights.items()}
+    tree_dict['features']={k:v.idx_split_variable if isinstance(v, SplitNode) else -2 for k,v in tree_items}
+    tree_dict['values']={k:return_mean(v.value) if not isinstance(v, SplitNode) else -3 for k,v in tree_items}
+    tree_dict['thresholds']={k:v.split_value if isinstance(v, SplitNode) else -3 for k,v in tree_items}
+    tree_dict={k:np.array(list(v.values())).reshape(-1,1) if k=='values' else np.array(list(v.values())) for k,v in tree_dict.items()}
+    return tree_dict, X_add
+    
+def return_pymc_int(tree,X,sample_mean=True): 
+  tree_dict, X_add=cvt_tree_pymc(tree,X)
+  model=dict(trees=[tree_dict])
+  explainer = shap.TreeExplainer(model,feature_perturbation="tree_path_dependent")
+  shap_vals=explainer.shap_values(np.vstack([X]+X_add),check_additivity=False)[:len(X)]
+  shap_int=explainer.shap_interaction_values(np.vstack([X]+X_add))[:len(X)]
+  if sample_mean: shap_vals,shap_int=np.abs(shap_vals).mean(0),np.abs(shap_int).mean(0)
+  return shap_int
+  
+def return_shap_pymc_iter_chain(idata,X,iter_=0,chain=0,n_tree=0):
+  shap_int_list=[dask.delayed(return_pymc_int)(idata.sample_stats.bart_trees[chain,iter_,i].item(),X) for i in range(n_tree if n_tree else idata.sample_stats.bart_trees.shape[2])]#tqdm.t,desc="tree"
+  return shap_int_list
+    
+def return_shap_pymc(idata,X,n_samples=30,use_abs=False,take_mean=False): 
+  n_chain,n_iter,n_tree=idata.sample_stats.bart_trees.shape
+  shap_ints=[]
+  for i in range(n_iter if not n_samples else n_samples):
+    shap_ints.append([])
+    for j in range(n_chain):
+        shap_ints[-1].append([])
+        for k in range(n_tree):
+            shap_ints[-1][-1].append(dask.delayed(return_pymc_int)(idata.sample_stats.bart_trees[j,i,k].item(),X))
+  with ProgressBar():
+    shap_ints=dask.compute(*shap_ints,num_workers=8,scheduler='threading')
+  shap_ints=np.stack(shap_ints)
+  if use_abs: shap_ints=np.abs(shap_ints)
+  if take_mean: shap_ints=shap_ints.mean(1)
+  return shap_ints
+```
+
+```{r}
+run.shap.int<-function(trees,X,n_samples,avg_forest=T,combine_chains=T){
+  X<-t(X)
+  trees_class<-class(trees)[1]
+  if (trees_class=="arviz.data.inference_data.InferenceData"){
+    shap_ints<-py$return_shap_pymc(trees,X,n_samples=n_samples)
+  } else if (trees_class=="data.frame"){
+    shap_ints<-py$run_shap_trees(r_to_py(trees),r_to_py(as.data.frame(X)),n_samples = n_samples)
+  } else {
+    return(NULL)
+  }
+  if (avg_forest){
+    shap_ints<-apply(shap_ints,c(1,2,4,5),mean)
+  }
+  if (combine_chains){
+    if (avg_forest){
+      comb_dim<-c(3,4)
+    } else {
+      comb_dim<-c(3,4,5)
+    }
+    shap_ints<-apply(shap_ints,comb_dim,c)
+  }
+  return(shap_ints)
+}
+extract<-dbarts:::extract
+```
+
+# Simulate
+
+```{r}
+set.seed(42)
+n.batches<-15L
+simulate.binary<-T
+simulate.data_4v<-function(n.batches=15L,
+                        sigma.b=15,
+                        seed=42,
+                        sample_size=500,
+                        b=c(25,1,3,-2),
+                        b_int=c(-2,3),
+                        simulate.binary=F,
+                        proportion=0.5)
+{set.seed(seed)
+X<-matrix(rnorm(4*sample_size),4,sample_size)
+e<-rnorm(sample_size)
+batch.val<-rnorm(n.batches,0,sigma.b<-15)
+batch.assignment<-sample(1:n.batches,500,replace=T)
+b_<-batch.val[batch.assignment]
+# b<-c(25,1,3,-2)
+mu<-as.vector(matrix(b,1,4)%*%X)+b_int[1]*X[3,]*X[2,]+b_int[2]*X[3,]*X[4,]+b_
+Y_star<-mu+e
+if (simulate.binary){Y<-Y_star>=quantile(Y_star,1-proportion)}
+else {Y<-Y_star}
+data<-as.data.frame(t(rbind(X,Y,batch.assignment)))
+return(list(data=data,X=X,Y=Y))}
+
+simulate.data_7v<-function(n.batches=15L,
+                        sigma.b=15,
+                        seed=42,
+                        sample_size=500,
+                        b=c(25,1,3,-2,7,3,2),
+                        b_int=c(-2,3),
+                        simulate.binary=F,
+                        proportion=0.5)
+{set.seed(seed)
+X<-matrix(rnorm(7*sample_size),7,sample_size)
+e<-rnorm(sample_size)
+batch.val<-rnorm(n.batches,0,sigma.b<-15)
+batch.assignment<-sample(1:n.batches,500,replace=T)
+b_<-batch.val[batch.assignment]
+# b<-c(25,1,3,-2)
+mu<-as.vector(matrix(b,1,7)%*%X)+b_int[1]*X[3,]*X[2,]+b_int[2]*X[3,]*X[4,]+b_
+Y_star<-mu+e
+if (simulate.binary){Y<-Y_star>=quantile(Y_star,1-proportion)}
+else {Y<-Y_star}
+data<-as.data.frame(t(rbind(X,Y,batch.assignment)))
+return(list(data=data,X=X,Y=Y))}
+data<-simulate.data_4v()$data
+X <- simulate.data_4v()$X
+```
+
+```{r}
+fit <- stan4bart(Y ~ bart(V1+V2+V3+V4) + (1 | batch.assignment), data,
+                 cores = 4, seed = 42,
+                 verbose = 1, bart_args=list(keepTrees=T,n.trees=75L,rngSeed=42L))
+
+bart_explain <- function(fit, X){
+  trees <- extract(fit, "trees")
+  shap_ints<-run.shap.int(trees,X,n_samples = 100L)
+  apply(shap_ints,c(2,3),mean)
+  var.int<-matrix(1:prod(dim(shap_ints)[2:3]),nrow=dim(shap_ints)[2],byrow=T)
+  int.df<-as.data.frame(t(apply(shap_ints,c(1),c)))[,var.int[lower.tri(var.int)]]
+  int.names<-var.int
+  for (i in 1:ncol(var.int)){
+    for (j in 1:nrow(var.int)){
+      int.names[i,j]<-paste("V",as.character(i),":V",as.character(j),sep="")
+    }
+  }
+  colnames(int.df)<-int.names[lower.tri(var.int)]
+  return(int.df)
+}
+int.df <- bart_explain(fit,X)
+describe_posterior(int.df)
+```
+
+```{r}
+make_posterior_plot<-function(int_df){int_df %>% pivot_longer(colnames(int_df)) %>% ggplot(aes(value,name)) +  geom_density_ridges() + theme_classic()}
+make_posterior_plot(int.df)
+```
+
+
+```{r}
+data<-simulate.data_7v()$data
+X <- simulate.data_7v()$X
+fit <- stan4bart(Y ~ bart(V1+V2+V3+V4+V5+V6+V7) + (1 | batch.assignment), data,
+                 cores = 4, seed = 42,
+                 verbose = 1, bart_args=list(keepTrees=T,n.trees=75L,rngSeed=42L))
+int.df <- bart_explain(fit,X)
+describe_posterior(int.df)
+```
+
+```{r}
+make_posterior_plot(int.df)
+```
